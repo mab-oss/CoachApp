@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { useAuth } from '../auth'
+import { api } from '../api'
 
 const links = [
   { to: '/', label: 'Dashboard', end: true },
@@ -9,7 +9,10 @@ const links = [
 ]
 
 export default function Layout() {
-  const { user, logout } = useAuth()
+  function handleReset() {
+    if (!window.confirm('Reset all local workout data? This cannot be undone.')) return
+    void api.resetData().then(() => window.location.assign('/'))
+  }
 
   return (
     <div className="app-shell">
@@ -36,11 +39,9 @@ export default function Layout() {
           </nav>
 
           <div className="user-area">
-            <span className="user-email" title={user?.email}>
-              {user?.email}
-            </span>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={logout}>
-              Log out
+            <span className="user-email">Stored in this browser</span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={handleReset}>
+              Reset data
             </button>
           </div>
         </div>
@@ -51,7 +52,7 @@ export default function Layout() {
       </main>
 
       <footer className="footer container">
-        CoachApp - log the work, see the trend, ask the coach.
+        CoachApp - log the work, see the trend, ask the coach. Your data never leaves this device.
       </footer>
     </div>
   )

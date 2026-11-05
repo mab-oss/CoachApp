@@ -17,6 +17,7 @@ export default function Dashboard() {
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [seeding, setSeeding] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -53,6 +54,25 @@ export default function Dashboard() {
     ).length
     return { bestE1rm, improving, plateaued, thisMonth }
   }, [exercises, workouts])
+
+  async function handleLoadSample() {
+    setSeeding(true)
+    setError('')
+    try {
+      await api.loadSampleData()
+      const [summaryData, workoutData] = await Promise.all([
+        api.progressSummary(8),
+        api.listWorkouts({ limit: 100 }),
+      ])
+      setSummary(summaryData)
+      setWorkouts(workoutData)
+      setSelected(summaryData.exercises[0]?.exercise ?? '')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the sample data.')
+    } finally {
+      setSeeding(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -121,10 +141,23 @@ export default function Dashboard() {
       {exercises.length === 0 ? (
         <div className="empty-state">
           <h2>No workouts yet</h2>
-          <p>Log your first session and the dashboard will fill with charts and trends.</p>
-          <Link className="btn btn-primary" to="/log">
-            Log your first workout
-          </Link>
+          <p>
+            Log your first session, or load eight weeks of sample training to explore the
+            dashboard and coach. All data stays in this browser.
+          </p>
+          <div className="head-actions">
+            <Link className="btn btn-primary" to="/log">
+              Log your first workout
+            </Link>
+            <button
+              className="btn btn-ghost"
+              type="button"
+              onClick={handleLoadSample}
+              disabled={seeding}
+            >
+              {seeding ? 'Loading sample data...' : 'Load sample data'}
+            </button>
+          </div>
         </div>
       ) : (
         <>

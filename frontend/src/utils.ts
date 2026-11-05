@@ -20,11 +20,7 @@ export function formatNumber(value: number, digits = 0): string {
   })
 }
 
-export function todayISO(): string {
-  const now = new Date()
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
-  return local.toISOString().slice(0, 10)
-}
+export { todayISO } from './dates'
 
 export function workoutVolume(sets: Array<{ reps: number; weight: number }>): number {
   return sets.reduce((total, set) => total + set.reps * set.weight, 0)

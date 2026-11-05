@@ -1,13 +1,16 @@
 # CoachApp frontend
 
-React + TypeScript + Vite UI for CoachApp.
+React + TypeScript + Vite single-page app for CoachApp.
 
-See the [project README](../README.md) for setup, the demo account, and architecture details.
+The app is fully client-side. Workouts, progress calculations, the deterministic agent, and
+suggestions all run in the browser, with data persisted in `localStorage`.
 
 ```powershell
 npm install
 npm run dev
 ```
 
-The dev server runs on http://localhost:5173 and proxies `/api` to the FastAPI backend on
-http://127.0.0.1:8000.
+The dev server runs on http://localhost:5173. Use **Load sample data** on the dashboard to seed
+eight weeks of training, or **Reset data** in the header to clear local storage.
+
+See the [project README](../README.md) for deployment and architecture details.

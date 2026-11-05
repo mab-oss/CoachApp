@@ -1,3 +1,16 @@
+import { runDeterministic } from './agent'
+import { getExerciseProgress, getProgressSummary } from './progress'
+import {
+  findExercise,
+  getData,
+  getOrCreateExercise,
+  loadSampleData as seedSampleData,
+  nextId,
+  nowISO,
+  resetData as clearAllData,
+  saveData,
+  type StoreData,
+} from './storage'
 import type {
   ChatMessage,
   ChatResponse,
@@ -5,14 +18,9 @@ import type {
   ExerciseProgress,
   ProgressSummary,
   Suggestion,
-  TokenResponse,
-  User,
   Workout,
   WorkoutPayload,
 } from './types'
-
-export const TOKEN_KEY = 'coachapp_token'
-const BASE = import.meta.env.VITE_API_URL ?? ''
 
 export class ApiError extends Error {
   status: number
@@ -24,102 +32,206 @@ export class ApiError extends Error {
   }
 }
 
-function errorDetail(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null
-  const detail = (data as { detail?: unknown }).detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail)) {
-    const messages = detail
-      .map((item) => (item && typeof item === 'object' ? (item as { msg?: unknown }).msg : null))
-      .filter((msg): msg is string => typeof msg === 'string')
-    if (messages.length) return messages.join(', ')
+function serializeWorkout(data: StoreData, workoutId: number): Workout | null {
+  const workout = data.workouts.find((item) => item.id === workoutId)
+  if (!workout) return null
+
+  const exercises = new Map(data.exercises.map((exercise) => [exercise.id, exercise]))
+  const sets = data.sets
+    .filter((set) => set.workout_id === workout.id)
+    .sort((a, b) => a.id - b.id)
+    .map((set) => ({
+      id: set.id,
+      exercise: exercises.get(set.exercise_id)?.name ?? '',
+      set_index: set.set_index,
+      reps: set.reps,
+      weight: set.weight,
+    }))
+
+  return {
+    id: workout.id,
+    performed_at: workout.performed_at,
+    notes: workout.notes,
+    sets,
   }
-  return null
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers)
-  if (options.body) headers.set('Content-Type', 'application/json')
-  const token = localStorage.getItem(TOKEN_KEY)
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-
-  let response: Response
-  try {
-    response = await fetch(`${BASE}${path}`, { ...options, headers })
-  } catch {
-    throw new ApiError('Cannot reach the server. Is the backend running?', 0)
+function pendingSuggestion(data: StoreData, id: number): Suggestion {
+  const suggestion = data.suggestions.find((item) => item.id === id)
+  if (!suggestion) throw new ApiError('Suggestion not found.', 404)
+  if (suggestion.status !== 'pending') {
+    throw new ApiError('This suggestion was already resolved.', 409)
   }
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`
-    try {
-      message = errorDetail(await response.json()) ?? message
-    } catch {
-      // ignore non-JSON error bodies
-    }
-    throw new ApiError(message, response.status)
-  }
-  if (response.status === 204) return undefined as T
-  return (await response.json()) as T
+  return suggestion
 }
 
 export const api = {
-  register: (email: string, password: string) =>
-    request<TokenResponse>('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    }),
-
-  login: (email: string, password: string) =>
-    request<TokenResponse>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    }),
-
-  demoLogin: () => request<TokenResponse>('/api/auth/demo', { method: 'POST' }),
-
-  me: () => request<User>('/api/auth/me'),
-
-  listExercises: () => request<Exercise[]>('/api/exercises'),
-
-  listWorkouts: (params: { exercise?: string; limit?: number } = {}) => {
-    const query = new URLSearchParams()
-    if (params.exercise) query.set('exercise', params.exercise)
-    if (params.limit) query.set('limit', String(params.limit))
-    const suffix = query.toString() ? `?${query.toString()}` : ''
-    return request<Workout[]>(`/api/workouts${suffix}`)
+  listExercises: (): Promise<Exercise[]> => {
+    const data = getData()
+    return Promise.resolve(
+      [...data.exercises]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((exercise) => ({ ...exercise })),
+    )
   },
 
-  createWorkout: (payload: WorkoutPayload) =>
-    request<Workout>('/api/workouts', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+  listWorkouts: (params: { exercise?: string; limit?: number } = {}): Promise<Workout[]> => {
+    const data = getData()
+    let workouts = [...data.workouts]
 
-  deleteWorkout: (id: number) =>
-    request<void>(`/api/workouts/${id}`, { method: 'DELETE' }),
+    if (params.exercise) {
+      const exercise = findExercise(data, params.exercise)
+      if (!exercise) return Promise.resolve([])
+      const workoutIds = new Set(
+        data.sets
+          .filter((set) => set.exercise_id === exercise.id)
+          .map((set) => set.workout_id),
+      )
+      workouts = workouts.filter((workout) => workoutIds.has(workout.id))
+    }
 
-  progressSummary: (weeks = 8) =>
-    request<ProgressSummary>(`/api/progress/summary?weeks=${weeks}`),
+    workouts.sort((a, b) => {
+      const byDate = b.performed_at.localeCompare(a.performed_at)
+      return byDate !== 0 ? byDate : b.id - a.id
+    })
 
-  exerciseProgress: (exercise: string, weeks = 8) =>
-    request<ExerciseProgress>(
-      `/api/progress?exercise=${encodeURIComponent(exercise)}&weeks=${weeks}`,
-    ),
+    const limit = Math.max(1, Math.min(200, params.limit ?? 50))
+    return Promise.resolve(
+      workouts
+        .slice(0, limit)
+        .map((workout) => serializeWorkout(data, workout.id))
+        .filter((workout): workout is Workout => workout !== null),
+    )
+  },
 
-  chat: (message: string) =>
-    request<ChatResponse>('/api/agent/chat', {
-      method: 'POST',
-      body: JSON.stringify({ message }),
-    }),
+  createWorkout: (payload: WorkoutPayload): Promise<Workout> => {
+    const data = getData()
+    const workout = {
+      id: nextId(data),
+      performed_at: payload.performed_at,
+      notes: payload.notes ?? null,
+      created_at: nowISO(),
+    }
+    data.workouts.push(workout)
 
-  listMessages: () => request<ChatMessage[]>('/api/agent/messages'),
+    const counters = new Map<number, number>()
+    for (const item of payload.sets) {
+      const exercise = getOrCreateExercise(data, item.exercise)
+      const setIndex = (counters.get(exercise.id) ?? 0) + 1
+      counters.set(exercise.id, setIndex)
+      data.sets.push({
+        id: nextId(data),
+        workout_id: workout.id,
+        exercise_id: exercise.id,
+        set_index: setIndex,
+        reps: item.reps,
+        weight: item.weight,
+      })
+    }
 
-  listSuggestions: (status?: string) =>
-    request<Suggestion[]>(`/api/suggestions${status ? `?status=${status}` : ''}`),
+    saveData(data)
+    const created = serializeWorkout(data, workout.id)
+    if (!created) throw new ApiError('Could not save the workout.', 500)
+    return Promise.resolve(created)
+  },
 
-  acceptSuggestion: (id: number) =>
-    request<Suggestion>(`/api/suggestions/${id}/accept`, { method: 'POST' }),
+  deleteWorkout: (id: number): Promise<void> => {
+    const data = getData()
+    const index = data.workouts.findIndex((workout) => workout.id === id)
+    if (index === -1) throw new ApiError('Workout not found.', 404)
 
-  rejectSuggestion: (id: number) =>
-    request<Suggestion>(`/api/suggestions/${id}/reject`, { method: 'POST' }),
+    data.workouts.splice(index, 1)
+    data.sets = data.sets.filter((set) => set.workout_id !== id)
+    saveData(data)
+    return Promise.resolve()
+  },
+
+  progressSummary: (weeks = 8): Promise<ProgressSummary> =>
+    Promise.resolve(getProgressSummary(getData(), weeks)),
+
+  exerciseProgress: (exercise: string, weeks = 8): Promise<ExerciseProgress> => {
+    const progress = getExerciseProgress(getData(), exercise, weeks)
+    if (!progress) throw new ApiError('Exercise not found.', 404)
+    return Promise.resolve(progress)
+  },
+
+  chat: (message: string): Promise<ChatResponse> => {
+    const data = getData()
+    const run = runDeterministic(data, message)
+    data.messages.push(
+      {
+        id: nextId(data),
+        role: 'user',
+        content: message,
+        created_at: nowISO(),
+      },
+      {
+        id: nextId(data),
+        role: 'assistant',
+        content: run.reply,
+        created_at: nowISO(),
+      },
+    )
+    saveData(data)
+
+    return Promise.resolve({
+      reply: run.reply,
+      tool_calls: run.tool_calls,
+      suggestion: run.suggestion,
+      mode: run.mode,
+    })
+  },
+
+  listMessages: (): Promise<ChatMessage[]> => {
+    const data = getData()
+    return Promise.resolve(
+      data.messages.slice(-50).map((message) => ({ ...message })),
+    )
+  },
+
+  listSuggestions: (status?: string): Promise<Suggestion[]> => {
+    const data = getData()
+    return Promise.resolve(
+      data.suggestions
+        .filter((suggestion) => !status || suggestion.status === status)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 50)
+        .map((suggestion) => ({ ...suggestion })),
+    )
+  },
+
+  acceptSuggestion: (id: number): Promise<Suggestion> => {
+    const data = getData()
+    const suggestion = pendingSuggestion(data, id)
+    if (suggestion.exercise_id !== null) {
+      const exercise = data.exercises.find((item) => item.id === suggestion.exercise_id)
+      const proposed = suggestion.payload.proposed_target_weight
+      if (exercise && typeof proposed === 'number') {
+        exercise.target_weight = proposed
+      }
+    }
+    suggestion.status = 'accepted'
+    suggestion.resolved_at = nowISO()
+    saveData(data)
+    return Promise.resolve({ ...suggestion })
+  },
+
+  rejectSuggestion: (id: number): Promise<Suggestion> => {
+    const data = getData()
+    const suggestion = pendingSuggestion(data, id)
+    suggestion.status = 'rejected'
+    suggestion.resolved_at = nowISO()
+    saveData(data)
+    return Promise.resolve({ ...suggestion })
+  },
+
+  loadSampleData: (): Promise<void> => {
+    seedSampleData()
+    return Promise.resolve()
+  },
+
+  resetData: (): Promise<void> => {
+    clearAllData()
+    return Promise.resolve()
+  },
 }
